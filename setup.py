@@ -18,7 +18,7 @@ ext_modules = [
 
 setup(
     name='qkmx',
-    version='0.1.0',
+    version='0.1.6',
     description='Pure C accelerated tensor operations',
     package_dir={'': 'src'},
     packages=['mx', 'tensor'],

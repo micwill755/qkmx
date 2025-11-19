@@ -1,15 +1,19 @@
 [build-system]
-requires = ["setuptools>=45", "wheel"]
+requires = ["setuptools>=45", "wheel", "qkbind"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "qkmx"
-version = "0.1.0"
+version = "0.1.6"
 description = "Pure C accelerated matrix operations for LLMs"
 readme = "README.md"
 requires-python = ">=3.7"
 authors = [
     {name = "Michael Williams", email = "mww565@icloud.com"}
+]
+
+dependencies = [
+    "qkbind"
 ]
 
 [project.urls]

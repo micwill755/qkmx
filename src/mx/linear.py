@@ -1,4 +1,3 @@
-import math
 from mx import Tensor, mat_mul, randn
 
 class Linear:
