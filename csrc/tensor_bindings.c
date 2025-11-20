@@ -248,15 +248,96 @@ static PyObject* PyTensor_masked_fill(PyTensorObject* self, PyObject* args) {
     return (PyObject*)result;
 }
 
+
+// Get scalar value method
+static PyObject* PyTensor_item(PyTensorObject* self, PyObject* args) {
+    // Parse indices
+    PyObject* indices_obj = NULL;
+    if (!PyArg_ParseTuple(args, "|O", &indices_obj)) return NULL;
+    
+    if (indices_obj == NULL || indices_obj == Py_None) {
+        // No indices - return first element
+        if (self->obj->size != 1) {
+            PyErr_SetString(PyExc_ValueError, "Can only convert 1-element tensor to scalar");
+            return NULL;
+        }
+        float val = ((float*)self->obj->data)[0];
+        return PyFloat_FromDouble(val);
+    }
+    
+    // TODO: Handle tuple of indices
+    PyErr_SetString(PyExc_NotImplementedError, "Indexed item() not yet implemented");
+    return NULL;
+}
+
+// scalar_div method
+static PyObject* PyTensor_scalar_div(PyTensorObject* self, PyObject* args) {
+    float scalar;
+    
+    if (!PyArg_ParseTuple(args, "f", &scalar)) {
+        return NULL;
+    }
+    
+    if (scalar == 0.0f) {
+        PyErr_SetString(PyExc_ZeroDivisionError, "Division by zero");
+        return NULL;
+    }
+    
+    PyTensorObject* result = PyObject_New(PyTensorObject, &PyTensorType);
+    result->obj = tensor_scalar_op(self->obj, scalar, TENSOR_DIV);
+    
+    if (!result->obj) {
+        Py_DECREF(result);
+        PyErr_SetString(PyExc_ValueError, "Scalar division failed");
+        return NULL;
+    }
+    
+    return (PyObject*)result;
+}
+
+// softmax method
+static PyObject* PyTensor_softmax(PyTensorObject* self, PyObject* args) {
+    int dim = -1;
+    if (!PyArg_ParseTuple(args, "|i", &dim)) return NULL;
+    
+    PyTensorObject* result = PyObject_New(PyTensorObject, &PyTensorType);
+    result->obj = tensor_softmax(self->obj, dim);
+    
+    if (!result->obj) {
+        Py_DECREF(result);
+        PyErr_SetString(PyExc_ValueError, "Softmax failed");
+        return NULL;
+    }
+    
+    return (PyObject*)result;
+}
+
+// gelu method
+static PyObject* PyTensor_gelu(PyTensorObject* self, PyObject* args) {
+    PyTensorObject* result = PyObject_New(PyTensorObject, &PyTensorType);
+    result->obj = tensor_gelu(self->obj);
+    
+    if (!result->obj) {
+        Py_DECREF(result);
+        PyErr_SetString(PyExc_ValueError, "GELU failed");
+        return NULL;
+    }
+    
+    return (PyObject*)result;
+}
+
 // Method table
 static PyMethodDef PyTensor_methods[] = {
     {"matmul", (PyCFunction)PyTensor_matmul, METH_VARARGS, "Matrix multiplication"},
+    {"scalar_div", (PyCFunction)PyTensor_scalar_div, METH_VARARGS, "Scalar division"},
     {"transpose", (PyCFunction)PyTensor_transpose, METH_VARARGS, "Transpose tensor"},
     {"layer_norm", (PyCFunction)PyTensor_layer_norm, METH_VARARGS, "Layer normalization"},
     {"rms_norm", (PyCFunction)PyTensor_rms_norm, METH_VARARGS, "RMS normalization"},
     {"reshape", (PyCFunction)PyTensor_reshape, METH_VARARGS, "Reshape tensor"},
     {"masked_fill", (PyCFunction)PyTensor_masked_fill, METH_VARARGS, "Fill values where mask is true"},
-    // arrays don't store their own length. When Python's C API loops through your methods, it needs to know when to stop:
+    {"softmax", (PyCFunction)PyTensor_softmax, METH_VARARGS, "Softmax activation"},
+    {"gelu", (PyCFunction)PyTensor_gelu, METH_VARARGS, "GELU activation"},
+    {"item", (PyCFunction)PyTensor_item, METH_VARARGS, "Get scalar value"},
     {NULL} 
 };
 
@@ -338,6 +419,104 @@ static PyObject* py_randn(PyObject* self, PyObject* args) {
     return (PyObject*)result;
 }
 
+// __getitem__ - tensor indexing
+static PyObject* PyTensor_getitem(PyTensorObject* self, PyObject* key) {
+    // Handle integer index
+    if (PyLong_Check(key)) {
+        long index = PyLong_AsLong(key);
+        
+        // Handle negative indexing
+        if (index < 0) {
+            index += self->obj->shape[0];
+        }
+        
+        // Bounds check
+        if (index < 0 || index >= self->obj->shape[0]) {
+            PyErr_SetString(PyExc_IndexError, "Index out of bounds");
+            return NULL;
+        }
+        
+        // Get slice at index
+        Tensor* result = tensor_get_index(self->obj, index);
+        if (!result) {
+            PyErr_SetString(PyExc_RuntimeError, "Failed to get index");
+            return NULL;
+        }
+        
+        PyTensorObject* py_result = PyObject_New(PyTensorObject, &PyTensorType);
+        py_result->obj = result;
+        return (PyObject*)py_result;
+    }
+    
+    // Handle tensor index (advanced indexing)
+    if (PyObject_TypeCheck(key, &PyTensorType)) {
+        PyTensorObject* index_tensor = (PyTensorObject*)key;
+        
+        // Call C function for advanced indexing
+        Tensor* result = tensor_advanced_index(self->obj, index_tensor->obj);
+        if (!result) {
+            PyErr_SetString(PyExc_RuntimeError, "Advanced indexing failed");
+            return NULL;
+        }
+        
+        PyTensorObject* py_result = PyObject_New(PyTensorObject, &PyTensorType);
+        py_result->obj = result;
+        return (PyObject*)py_result;
+    }
+    
+    PyErr_SetString(PyExc_TypeError, "Index must be an integer or Tensor");
+    return NULL;
+}
+
+// __setitem__ - tensor index assignment
+static int PyTensor_setitem(PyTensorObject* self, PyObject* key, PyObject* value) {
+    if (!PyLong_Check(key)) {
+        PyErr_SetString(PyExc_TypeError, "Index must be an integer");
+        return -1;
+    }
+    
+    long index = PyLong_AsLong(key);
+    
+    // Handle negative indexing
+    if (index < 0) {
+        index += self->obj->shape[0];
+    }
+    
+    // Bounds check
+    if (index < 0 || index >= self->obj->shape[0]) {
+        PyErr_SetString(PyExc_IndexError, "Index out of bounds");
+        return -1;
+    }
+    
+    // Handle scalar value
+    if (PyFloat_Check(value) || PyLong_Check(value)) {
+        float val = PyFloat_Check(value) ? PyFloat_AsDouble(value) : PyLong_AsDouble(value);
+        if (tensor_set_scalar(self->obj, index, val) != 0) {
+            PyErr_SetString(PyExc_RuntimeError, "Failed to set scalar");
+            return -1;
+        }
+        return 0;
+    }
+    
+    // Handle tensor value
+    if (PyObject_TypeCheck(value, &PyTensorType)) {
+        PyTensorObject* tensor_val = (PyTensorObject*)value;
+        if (tensor_set_index(self->obj, index, tensor_val->obj) != 0) {
+            PyErr_SetString(PyExc_RuntimeError, "Failed to set index");
+            return -1;
+        }
+        return 0;
+    }
+    
+    PyErr_SetString(PyExc_TypeError, "Value must be a number or Tensor");
+    return -1;
+}
+
+static PyMappingMethods PyTensor_as_mapping = {
+    .mp_subscript = (binaryfunc)PyTensor_getitem,
+    .mp_ass_subscript = (objobjargproc)PyTensor_setitem,
+};
+
 // Module methods
 static PyMethodDef module_methods[] = {
     {"randn", py_randn, METH_VARARGS, "Random normal tensor"},
@@ -352,6 +531,7 @@ QKBIND_TYPE_BEGIN(Tensor, tensor_c)
     .tp_methods = PyTensor_methods,
     .tp_getset = PyTensor_getset,
     .tp_as_number = &PyTensor_as_number,
+    .tp_as_mapping = &PyTensor_as_mapping,
     .tp_str = (reprfunc)PyTensor_str,
     .tp_doc = "Fast C Tensor",
 QKBIND_TYPE_END

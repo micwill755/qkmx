@@ -42,10 +42,20 @@ class Tensor:
         result_c = self._c_tensor + other._c_tensor
         return Tensor._from_c_tensor(result_c)
     
+    def __truediv__(self, scalar):
+        """Scalar division (Tensor / scalar)"""
+        if not isinstance(scalar, (int, float)):
+            raise TypeError("Can only divide Tensor by scalar")
+        result_c = self._c_tensor.scalar_div(float(scalar))
+        return Tensor._from_c_tensor(result_c)
+
     def __mul__(self, other):
-        """Element-wise multiplication (runs in C)"""
+        """Element-wise multiplication or scalar multiplication"""
+        if isinstance(other, (int, float)):
+            # Scalar multiplication - implement in C or use a workaround
+            raise NotImplementedError("Scalar multiplication not yet implemented")
         if not isinstance(other, Tensor):
-            raise TypeError("Can only multiply Tensor with Tensor")
+            raise TypeError("Can only multiply Tensor with Tensor or scalar")
         result_c = self._c_tensor * other._c_tensor
         return Tensor._from_c_tensor(result_c)
     
@@ -54,6 +64,13 @@ class Tensor:
         # TODO: implement in C
         raise NotImplementedError("Subtraction not yet implemented in C backend")
     
+    def __matmul__(self, other):
+        """Matrix multiplication using @ operator (runs in C)"""
+        if not isinstance(other, Tensor):
+            raise TypeError("Can only matmul Tensor with Tensor")
+        result_c = self._c_tensor.matmul(other._c_tensor)
+        return Tensor._from_c_tensor(result_c)
+
     def matmul(self, other):
         """Matrix multiplication (runs in C)"""
         if not isinstance(other, Tensor):
@@ -61,6 +78,36 @@ class Tensor:
         result_c = self._c_tensor.matmul(other._c_tensor)
         return Tensor._from_c_tensor(result_c)
     
+    def reshape(self, new_shape):
+        """Reshape tensor (runs in C)"""
+        result_c = self._c_tensor.reshape(list(new_shape))
+        return Tensor._from_c_tensor(result_c)
+    
+    def layer_norm(self, gamma, beta, eps):
+        """Layer normalization (runs in C)"""
+        result_c = self._c_tensor.layer_norm(gamma._c_tensor, beta._c_tensor, eps)
+        return Tensor._from_c_tensor(result_c)
+
+    def rms_norm(self, weight, eps):
+        """RMS normalization (runs in C)"""
+        result_c = self._c_tensor.rms_norm(weight._c_tensor, eps)
+        return Tensor._from_c_tensor(result_c)
+
+    def transpose(self, dim0, dim1):
+        """Transpose two dimensions (runs in C)"""
+        result_c = self._c_tensor.transpose(dim0, dim1)
+        return Tensor._from_c_tensor(result_c)
+    
+    def softmax(self, dim=-1):
+        """Softmax activation (runs in C)"""
+        result_c = self._c_tensor.softmax(dim)
+        return Tensor._from_c_tensor(result_c)
+
+    def gelu(self):
+        """GELU activation (runs in C)"""
+        result_c = self._c_tensor.gelu()
+        return Tensor._from_c_tensor(result_c)
+
     @property
     def shape(self):
         """Get tensor shape"""
@@ -91,6 +138,25 @@ class Tensor:
     def __repr__(self):
         """Delegate to C tensor's string representation"""
         return str(self._c_tensor)
+    
+    def __getitem__(self, index):
+        """Get item by index"""
+        # If index is an mx.Tensor, extract the C tensor
+        if isinstance(index, Tensor):
+            result = self._c_tensor[index._c_tensor]
+        else:
+            result = self._c_tensor[index]
+        
+        if hasattr(result, 'shape'):
+            return Tensor._from_c_tensor(result)
+        return result
+    
+    def __setitem__(self, index, value):
+        """Set item by index"""
+        if isinstance(value, Tensor):
+            self._c_tensor[index] = value._c_tensor
+        else:
+            self._c_tensor[index] = value
 
 def zeros(shape, dtype=float32):
     """Create tensor filled with zeros"""

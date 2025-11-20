@@ -21,7 +21,7 @@ setup(
     version='0.1.6',
     description='Pure C accelerated tensor operations',
     package_dir={'': 'src'},
-    packages=['mx', 'tensor'],
+    packages=['mx'],
     py_modules=['tensor_c'],
     ext_modules=ext_modules,
     python_requires='>=3.7',

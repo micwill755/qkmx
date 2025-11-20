@@ -1,4 +1,4 @@
-from .tensor.tensor import Tensor
+from .tensor import Tensor
 from .linear import Linear
 from .module import Module
 from .norm import LayerNorm, RMSNorm

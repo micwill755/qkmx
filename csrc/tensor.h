@@ -14,8 +14,9 @@ typedef enum {
 } DType;
 
 typedef enum {
+    TENSOR_ADD,
     TENSOR_MUL,
-    TENSOR_ADD
+    TENSOR_DIV
 } TensorOperation;
 
 typedef struct {
@@ -47,5 +48,13 @@ Tensor* tensor_rand(int* shape, int ndim, DType dtype);
 Tensor* tensor_zeros(int* shape, int ndim, DType dtype);
 Tensor* tensor_ones(int* shape, int ndim, DType dtype);
 void tensor_free(Tensor *t);
+Tensor* tensor_get_index(Tensor* t, int index);
+Tensor* tensor_advanced_index(Tensor* t, Tensor* indices);
+int tensor_set_index(Tensor* t, int index, Tensor* value);
+int tensor_set_scalar(Tensor* t, int index, float value);
+float tensor_get_scalar(Tensor* t, int* indices, int num_indices);
+Tensor* tensor_scalar_op(const Tensor* t, float scalar, TensorOperation op);
+Tensor* tensor_softmax(const Tensor* t, int dim);
+Tensor* tensor_gelu(const Tensor* t);
 
 #endif // TENSOR_H

@@ -1,4 +1,5 @@
 import tensor_c
+from .tensor import Tensor
 
 def softmax(input, dim=-1):
     """Apply softmax along dimension"""
@@ -10,14 +11,17 @@ def gelu(input):
 
 def triu(size, diagonal=0):
     """Upper triangular matrix"""
-    return tensor_c.triu(size, diagonal)
+    c_tensor = tensor_c.triu(size, diagonal)
+    return Tensor._from_c_tensor(c_tensor)
 
 def randn(shape):
     """Random normal tensor"""
-    return tensor_c.randn(shape)
+    c_tensor = tensor_c.randn(list(shape))
+    return Tensor._from_c_tensor(c_tensor)
 
 def zeros(shape):
-    return tensor_c.zeros(shape)
+    return Tensor(shape)
 
 def ones(shape):
-    return tensor_c.ones(shape)
+    c_tensor = tensor_c.ones(list(shape))
+    return Tensor._from_c_tensor(c_tensor)
