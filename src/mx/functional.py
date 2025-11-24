@@ -25,3 +25,11 @@ def zeros(shape):
 def ones(shape):
     c_tensor = tensor_c.ones(list(shape))
     return Tensor._from_c_tensor(c_tensor)
+
+def array(data):
+    """Convert Python list or NumPy array to mx.Tensor"""
+    return Tensor(data)
+
+def mean(input):
+    """Compute mean of all elements"""
+    return input.mean()

@@ -7,37 +7,66 @@
 #include <math.h>
 #include <stdio.h>
 
+#define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
+#include <numpy/arrayobject.h>
+
+#ifdef USE_CUDA
+#include <cuda_runtime.h>
+#endif
+
+#include "dispatch.h"
+
+// ============================================================================
+// MEMORY MANAGEMENT
+// ============================================================================
+
 Tensor* tensor_create(int* shape, int ndim, DType dtype) {
-    Tensor *t = (Tensor*)malloc(sizeof(Tensor));
+    Tensor *t = malloc(sizeof(Tensor));
+    if (!t) return NULL;
+    
     t->ndim = ndim;
     t->dtype = dtype;
     t->owns_data = 1;
-    t->shape = (int*)malloc(ndim * sizeof(int));
-    t->size = 1;
     t->strides = NULL;
+    t->device = DEVICE_CPU;
+    t->shape = malloc(ndim * sizeof(int));
+    if (!t->shape) {
+        free(t);
+        return NULL;
+    }
+    
+    t->size = 1;
     for (int i = 0; i < ndim; i++) {
         t->shape[i] = shape[i];
         t->size *= shape[i];
     }
 
-    // Calculate bytes once
     size_t bytes;
     switch(dtype) {
         case DTYPE_FLOAT32: bytes = t->size * 4; break;
         case DTYPE_FLOAT16: bytes = t->size * 2; break;
-        case DTYPE_INT8:    bytes = t->size * 1; break;
+        case DTYPE_INT8:    bytes = t->size; break;
         case DTYPE_INT4:    bytes = (t->size + 1) / 2; break;
-        case DTYPE_UINT8:   bytes = t->size * 1; break;
+        case DTYPE_UINT8:   bytes = t->size; break;
         default:            bytes = t->size * 4; break;
     }
-    t->data = calloc(bytes, 1);  // Single allocation
+    t->data = calloc(bytes, 1);
+    if (!t->data) {
+        free(t->shape);
+        free(t);
+        return NULL;
+    }
 
     return t;
 }
 
 Tensor* tensor_zeros(int* shape, int ndim, DType dtype) {
-    return tensor_create(shape, ndim, dtype); 
+    return tensor_create(shape, ndim, dtype);
 }
+
+// ============================================================================
+// TENSOR CREATION
+// ============================================================================
 
 Tensor* tensor_ones(int* shape, int ndim, DType dtype) {
     Tensor* t = tensor_create(shape, ndim, dtype);
@@ -50,18 +79,20 @@ Tensor* tensor_ones(int* shape, int ndim, DType dtype) {
     return t;
 }
 
-// Create tensor with random normal values
-Tensor* tensor_randn(int* shape, int ndim, DType dtype) {
-    Tensor* t = tensor_create(shape, ndim, dtype);
-    
-    // Seed random (call once at program start)
+static void ensure_seeded(void) {
     static int seeded = 0;
     if (!seeded) {
         srand(time(NULL));
         seeded = 1;
     }
+}
+
+Tensor* tensor_randn(int* shape, int ndim, DType dtype) {
+    Tensor* t = tensor_create(shape, ndim, dtype);
+    if (!t) return NULL;
     
-    // Fill with random values
+    ensure_seeded();
+    
     if (dtype == DTYPE_FLOAT32) {
         float* data = (float*)t->data;
         for (size_t i = 0; i < t->size; i++) {
@@ -72,15 +103,11 @@ Tensor* tensor_randn(int* shape, int ndim, DType dtype) {
     return t;
 }
 
-// Uniform random [0, 1)
 Tensor* tensor_rand(int* shape, int ndim, DType dtype) {
     Tensor* t = tensor_create(shape, ndim, dtype);
+    if (!t) return NULL;
     
-    static int seeded = 0;
-    if (!seeded) {
-        srand(time(NULL));
-        seeded = 1;
-    }
+    ensure_seeded();
     
     if (dtype == DTYPE_FLOAT32) {
         float* data = (float*)t->data;
@@ -93,42 +120,33 @@ Tensor* tensor_rand(int* shape, int ndim, DType dtype) {
 }
 
 void tensor_free(Tensor *t) {
-    if (t) {
-        if (t->owns_data) {
-            free(t->data);
+    if (!t) return;
+    
+    if (t->owns_data && t->data) {
+        if (t->device == DEVICE_CUDA) {
+#ifdef USE_CUDA
+            cudaFree(t->data);  // Free GPU memory
+#endif
+        } else {
+            free(t->data);  // Free CPU memory
         }
-        free(t->shape);
-        if (t->strides) {
-            free(t->strides);
-        }
-        free(t);
     }
+    free(t->shape);
+    free(t->strides);
+    free(t);
 }
 
-#define TENSOR_OP_IMPL(type, a, b, out, size, op) \
-    do { \
-        type* a_data = (type*)(a)->data; \
-        type* b_data = (type*)(b)->data; \
-        type* out_data = (type*)(out)->data; \
-        switch(op) { \
-            case TENSOR_MUL: \
-                for (size_t i = 0; i < (size); i++) { \
-                    out_data[i] = a_data[i] * b_data[i]; \
-                } \
-                break; \
-            case TENSOR_ADD: \
-                for (size_t i = 0; i < (size); i++) { \
-                    out_data[i] = a_data[i] + b_data[i]; \
-                } \
-                break; \
-        } \
-    } while(0)
+
+// ============================================================================
+// ELEMENT-WISE OPERATIONS
+// ============================================================================
 
 Tensor* tensor_op(const Tensor* a, const Tensor* b, TensorOperation op) {
     if (a->dtype != b->dtype) return NULL;
     
     int out_ndim = (a->ndim > b->ndim) ? a->ndim : b->ndim;
-    int* out_shape = (int*)malloc(out_ndim * sizeof(int));
+    int* out_shape = malloc(out_ndim * sizeof(int));
+    if (!out_shape) return NULL;
     
     for (int i = 0; i < out_ndim; i++) {
         int idx_a = i - (out_ndim - a->ndim);
@@ -152,9 +170,14 @@ Tensor* tensor_op(const Tensor* a, const Tensor* b, TensorOperation op) {
         float* b_data = (float*)b->data;
         float* out_data = (float*)out->data;
         
-        // Pre-calculate strides for both tensors
-        size_t* a_strides = (size_t*)malloc(out_ndim * sizeof(size_t));
-        size_t* b_strides = (size_t*)malloc(out_ndim * sizeof(size_t));
+        size_t* a_strides = malloc(out_ndim * sizeof(size_t));
+        size_t* b_strides = malloc(out_ndim * sizeof(size_t));
+        if (!a_strides || !b_strides) {
+            free(a_strides);
+            free(b_strides);
+            tensor_free(out);
+            return NULL;
+        }
         
         a_strides[out_ndim - 1] = 1;
         b_strides[out_ndim - 1] = 1;
@@ -197,6 +220,9 @@ Tensor* tensor_op(const Tensor* a, const Tensor* b, TensorOperation op) {
                 case TENSOR_MUL:
                     out_data[i] = a_data[a_idx] * b_data[b_idx];
                     break;
+                case TENSOR_SUB:
+                    out_data[i] = a_data[a_idx] - b_data[b_idx];
+                    break;
             }
         }
         
@@ -232,116 +258,18 @@ Tensor* tensor_scalar_op(const Tensor* t, float scalar, TensorOperation op) {
     return out;
 }
 
-#define MATMUL_IMPL(type, a_data, b_data, out_data, M, K, N) \
-    do { \
-        for (int i = 0; i < (M); i++) { \
-            for (int j = 0; j < (N); j++) { \
-                type sum = 0; \
-                for (int k = 0; k < (K); k++) { \
-                    sum += (a_data)[i * (K) + k] * (b_data)[k * (N) + j]; \
-                } \
-                (out_data)[i * (N) + j] = sum; \
-            } \
-        } \
-    } while(0)
+// ============================================================================
+// MATRIX OPERATIONS
+// ============================================================================
 
 Tensor* tensor_matmul(const Tensor* a, const Tensor* b) {
-    if (a->dtype != b->dtype) return NULL;
-    if (a->ndim < 2 || b->ndim < 2) return NULL;
-    
-    // Get matrix dimensions (last 2 dims)
-    int M = a->shape[a->ndim - 2];
-    int K = a->shape[a->ndim - 1];
-    int K_b = b->shape[b->ndim - 2];
-    int N = b->shape[b->ndim - 1];
-    
-    if (K != K_b) return NULL;  // Inner dims must match
-    
-    // Determine output ndim (max of the two)
-    int out_ndim = (a->ndim > b->ndim) ? a->ndim : b->ndim;
-    int batch_ndim = out_ndim - 2;
-    
-    // Build output shape and check broadcasting compatibility
-    int* out_shape = (int*)malloc(out_ndim * sizeof(int));
-    
-    for (int i = 0; i < batch_ndim; i++) {
-        int idx_a = i - (batch_ndim - (a->ndim - 2));
-        int idx_b = i - (batch_ndim - (b->ndim - 2));
-        
-        int dim_a = (idx_a >= 0) ? a->shape[idx_a] : 1;
-        int dim_b = (idx_b >= 0) ? b->shape[idx_b] : 1;
-        
-        // Check broadcasting rule
-        if (dim_a != dim_b && dim_a != 1 && dim_b != 1) {
-            free(out_shape);
-            return NULL;
-        }
-        out_shape[i] = (dim_a > dim_b) ? dim_a : dim_b;
+    // Ensure both tensors on same device
+    if (a->device != b->device) {
+        fprintf(stderr, "Tensors must be on same device\n");
+        return NULL;
     }
-    out_shape[out_ndim - 2] = M;
-    out_shape[out_ndim - 1] = N;
-    
-    Tensor* out = tensor_create(out_shape, out_ndim, a->dtype);
-    free(out_shape);
-    
-    // Calculate total batch size
-    size_t total_batch = 1;
-    for (int i = 0; i < batch_ndim; i++) {
-        total_batch *= out->shape[i];
-    }
-    
-    if (a->dtype == DTYPE_FLOAT32) {
-        float* a_data = (float*)a->data;
-        float* b_data = (float*)b->data;
-        float* out_data = (float*)out->data;
-        
-        size_t matrix_size_a = M * K;
-        size_t matrix_size_b = K * N;
-        size_t matrix_size_out = M * N;
-        
-        // Calculate strides for batch dimensions
-        size_t* strides_a = (size_t*)malloc(batch_ndim * sizeof(size_t));
-        size_t* strides_b = (size_t*)malloc(batch_ndim * sizeof(size_t));
-        
-        size_t stride_a = matrix_size_a;
-        size_t stride_b = matrix_size_b;
-        for (int i = batch_ndim - 1; i >= 0; i--) {
-            int idx_a = i - (batch_ndim - (a->ndim - 2));
-            int idx_b = i - (batch_ndim - (b->ndim - 2));
-            
-            strides_a[i] = (idx_a >= 0 && a->shape[idx_a] > 1) ? stride_a : 0;
-            strides_b[i] = (idx_b >= 0 && b->shape[idx_b] > 1) ? stride_b : 0;
-            
-            if (idx_a >= 0) stride_a *= a->shape[idx_a];
-            if (idx_b >= 0) stride_b *= b->shape[idx_b];
-        }
-        
-        // Perform batched matmul
-        for (size_t batch = 0; batch < total_batch; batch++) {
-            // Calculate batch indices
-            size_t idx_a = 0, idx_b = 0;
-            size_t temp = batch;
-            
-            for (int i = batch_ndim - 1; i >= 0; i--) {
-                size_t coord = temp % out->shape[i];
-                temp /= out->shape[i];
-                idx_a += coord * strides_a[i];
-                idx_b += coord * strides_b[i];
-            }
-            
-            // Single matrix multiply
-            float* a_mat = a_data + idx_a;
-            float* b_mat = b_data + idx_b;
-            float* out_mat = out_data + batch * matrix_size_out;
-            
-            MATMUL_IMPL(float, a_mat, b_mat, out_mat, M, K, N);
-        }
-        
-        free(strides_a);
-        free(strides_b);
-    }
-    
-    return out;
+    const DispatchTable* dispatch = get_dispatch_table(a->device);
+    return dispatch->matmul(a, b);
 }
 
 Tensor* tensor_transpose(const Tensor* t, int dim0, int dim1) {
@@ -434,47 +362,14 @@ Tensor* tensor_reshape(const Tensor* t, int* new_shape, int new_ndim) {
     return out;
 }
 
-// tensor.c
+// ============================================================================
+// NORMALIZATION
+// ============================================================================
+
 Tensor* tensor_layer_norm(const Tensor* x, const Tensor* gamma, 
                           const Tensor* beta, float eps) {
-    // Normalize over last dimension
-    // x: any shape [..., D]
-    // gamma, beta: [D]
-    
-    Tensor* out = tensor_create(x->shape, x->ndim, x->dtype);
-    float* x_data = (float*)x->data;
-    float* out_data = (float*)out->data;
-    float* gamma_data = (float*)gamma->data;
-    float* beta_data = (float*)beta->data;
-    
-    int D = x->shape[x->ndim - 1];  // Last dimension
-    int outer_size = x->size / D;    // All other dimensions
-    
-    for (int i = 0; i < outer_size; i++) {
-        float* row = &x_data[i * D];
-        float* out_row = &out_data[i * D];
-        
-        // Compute mean
-        float mean = 0;
-        for (int j = 0; j < D; j++) mean += row[j];
-        mean /= D;
-        
-        // Compute variance
-        float var = 0;
-        for (int j = 0; j < D; j++) {
-            float diff = row[j] - mean;
-            var += diff * diff;
-        }
-        var /= D;
-        
-        // Normalize
-        float inv_std = 1.0f / sqrtf(var + eps);
-        for (int j = 0; j < D; j++) {
-            out_row[j] = (row[j] - mean) * inv_std * gamma_data[j] + beta_data[j];
-        }
-    }
-    
-    return out;
+    const DispatchTable* dispatch = get_dispatch_table(x->device);
+    return dispatch->layer_norm(x, gamma, beta, eps);
 }
 
 Tensor* tensor_rms_norm(const Tensor* x, const Tensor* weight, float eps) {
@@ -505,7 +400,10 @@ Tensor* tensor_rms_norm(const Tensor* x, const Tensor* weight, float eps) {
     return out;
 }
 
-// Create upper triangular mask
+// ============================================================================
+// MASKING & UTILITIES
+// ============================================================================
+
 Tensor* tensor_triu(int size, int diagonal) {
     int shape[2] = {size, size};
     Tensor* out = tensor_create(shape, 2, DTYPE_FLOAT32);
@@ -533,78 +431,23 @@ Tensor* tensor_masked_fill(const Tensor* t, const Tensor* mask, float value) {
 }
 
 Tensor* tensor_softmax(const Tensor* t, int dim) {
-    Tensor* out = tensor_create(t->shape, t->ndim, t->dtype);
-    
-    if (t->dtype == DTYPE_FLOAT32) {
-        float* in_data = (float*)t->data;
-        float* out_data = (float*)out->data;
-        
-        // Handle negative dim
-        if (dim < 0) dim += t->ndim;
-        
-        // Calculate size of dimension and outer/inner sizes
-        int dim_size = t->shape[dim];
-        int outer_size = 1;
-        for (int i = 0; i < dim; i++) outer_size *= t->shape[i];
-        int inner_size = 1;
-        for (int i = dim + 1; i < t->ndim; i++) inner_size *= t->shape[i];
-        
-        for (int outer = 0; outer < outer_size; outer++) {
-            for (int inner = 0; inner < inner_size; inner++) {
-                int base_idx = outer * dim_size * inner_size + inner;
-                
-                // Find max for numerical stability
-                float max_val = in_data[base_idx];
-                for (int d = 1; d < dim_size; d++) {
-                    int idx = base_idx + d * inner_size;
-                    if (in_data[idx] > max_val) max_val = in_data[idx];
-                }
-                
-                // Compute exp and sum
-                float sum = 0.0f;
-                for (int d = 0; d < dim_size; d++) {
-                    int idx = base_idx + d * inner_size;
-                    out_data[idx] = expf(in_data[idx] - max_val);
-                    sum += out_data[idx];
-                }
-                
-                // Normalize
-                for (int d = 0; d < dim_size; d++) {
-                    int idx = base_idx + d * inner_size;
-                    out_data[idx] /= sum;
-                }
-            }
-        }
-    }
-    
-    return out;
+    const DispatchTable* dispatch = get_dispatch_table(t->device);
+    return dispatch->softmax(t, dim);
 }
+
+// ============================================================================
+// ACTIVATION FUNCTIONS
+// ============================================================================
 
 Tensor* tensor_gelu(const Tensor* t) {
-    Tensor* out = tensor_create(t->shape, t->ndim, t->dtype);
-    
-    if (t->dtype == DTYPE_FLOAT32) {
-        float* in_data = (float*)t->data;
-        float* out_data = (float*)out->data;
-        
-        for (size_t i = 0; i < t->size; i++) {
-            float x = in_data[i];
-            // GELU approximation: 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x^3)))
-            float x3 = x * x * x;
-            float inner = 0.7978845608f * (x + 0.044715f * x3);
-            out_data[i] = 0.5f * x * (1.0f + tanhf(inner));
-        }
-    }
-    
-    return out;
+    const DispatchTable* dispatch = get_dispatch_table(t->device);
+    return dispatch->gelu(t);
 }
 
-void* tensor_get_data(const Tensor* t) {
-    return t->data;
-}
+// ============================================================================
+// INDEXING & SLICING
+// ============================================================================
 
-// Get tensor slice at index (returns view or copy)
-// Get tensor slice at index (returns view)
 Tensor* tensor_get_index(Tensor* t, int index) {
     if (t->ndim == 1) {
         // Return scalar as 0-d tensor (must copy for scalar)
@@ -708,7 +551,6 @@ Tensor* tensor_advanced_index(Tensor* t, Tensor* indices) {
     return result;
 }
 
-// Set scalar at index
 int tensor_set_scalar(Tensor* t, int index, float value) {
     if (t->ndim == 1) {
         ((float*)t->data)[index] = value;
@@ -742,4 +584,23 @@ float tensor_get_scalar(Tensor* t, int* indices, int num_indices) {
     }
     
     return ((float*)t->data)[flat_idx];
+}
+
+// ============================================================================
+// UTILITY FUNCTIONS
+// ============================================================================
+
+void* tensor_get_data(const Tensor* t) {
+    return t->data;
+}
+
+float tensor_mean(const Tensor* t) {
+    if (t->dtype != DTYPE_FLOAT32) return 0.0f;
+    
+    float* data = (float*)t->data;
+    float sum = 0.0f;
+    for (size_t i = 0; i < t->size; i++) {
+        sum += data[i];
+    }
+    return sum / t->size;
 }

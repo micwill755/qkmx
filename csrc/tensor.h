@@ -6,6 +6,11 @@
 #include <stdint.h>
 
 typedef enum {
+    DEVICE_CPU,
+    DEVICE_CUDA
+} DeviceType;
+
+typedef enum {
     DTYPE_FLOAT32,
     DTYPE_FLOAT16,
     DTYPE_INT8,
@@ -16,7 +21,8 @@ typedef enum {
 typedef enum {
     TENSOR_ADD,
     TENSOR_MUL,
-    TENSOR_DIV
+    TENSOR_DIV,
+    TENSOR_SUB
 } TensorOperation;
 
 typedef struct {
@@ -27,6 +33,7 @@ typedef struct {
     int ndim;
     size_t size;
     DType dtype;
+    DeviceType device;
 } Tensor;
 
 // Core functions
@@ -56,5 +63,10 @@ float tensor_get_scalar(Tensor* t, int* indices, int num_indices);
 Tensor* tensor_scalar_op(const Tensor* t, float scalar, TensorOperation op);
 Tensor* tensor_softmax(const Tensor* t, int dim);
 Tensor* tensor_gelu(const Tensor* t);
+float tensor_mean(const Tensor* t);
+
+// device functions
+Tensor* tensor_to_cuda(const Tensor* t);
+Tensor* tensor_to_cpu(const Tensor* t);
 
 #endif // TENSOR_H

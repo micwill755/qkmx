@@ -1,6 +1,8 @@
 // tensor_bindings.c - Python bindings using qkbind
 #include "qkbind.h"
 #include "tensor.h"
+#define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
+#include <numpy/arrayobject.h>
 
 // Forward declare the type
 static PyTypeObject PyTensorType;
@@ -39,13 +41,15 @@ static Tensor* tensor_mul_wrapper(Tensor* a, Tensor* b) {
     return tensor_op(a, b, TENSOR_MUL);
 }
 
-// __add__ operator
+static Tensor* tensor_sub_wrapper(Tensor* a, Tensor* b) {
+    return tensor_op(a, b, TENSOR_SUB);
+}
+
 QKBIND_BINOP(Tensor, add, tensor_add_wrapper)
-
-// __mul__ operator
 QKBIND_BINOP(Tensor, mul, tensor_mul_wrapper)
+QKBIND_BINOP(Tensor, sub, tensor_sub_wrapper)
 
-// matmul method
+
 QKBIND_METHOD(Tensor, matmul, tensor_matmul)
 
 static PyObject* py_zeros(PyObject* self, PyObject* args) {
@@ -295,6 +299,26 @@ static PyObject* PyTensor_scalar_div(PyTensorObject* self, PyObject* args) {
     return (PyObject*)result;
 }
 
+// scalar_mul method
+static PyObject* PyTensor_scalar_mul(PyTensorObject* self, PyObject* args) {
+    float scalar;
+    
+    if (!PyArg_ParseTuple(args, "f", &scalar)) {
+        return NULL;
+    }
+    
+    PyTensorObject* result = PyObject_New(PyTensorObject, &PyTensorType);
+    result->obj = tensor_scalar_op(self->obj, scalar, TENSOR_MUL);
+    
+    if (!result->obj) {
+        Py_DECREF(result);
+        PyErr_SetString(PyExc_ValueError, "Scalar multiplication failed");
+        return NULL;
+    }
+    
+    return (PyObject*)result;
+}
+
 // softmax method
 static PyObject* PyTensor_softmax(PyTensorObject* self, PyObject* args) {
     int dim = -1;
@@ -326,10 +350,17 @@ static PyObject* PyTensor_gelu(PyTensorObject* self, PyObject* args) {
     return (PyObject*)result;
 }
 
+// mean method
+static PyObject* PyTensor_mean(PyTensorObject* self, PyObject* args) {
+    float result = tensor_mean(self->obj);
+    return PyFloat_FromDouble(result);
+}
+
 // Method table
 static PyMethodDef PyTensor_methods[] = {
     {"matmul", (PyCFunction)PyTensor_matmul, METH_VARARGS, "Matrix multiplication"},
     {"scalar_div", (PyCFunction)PyTensor_scalar_div, METH_VARARGS, "Scalar division"},
+    {"scalar_mul", (PyCFunction)PyTensor_scalar_mul, METH_VARARGS, "Scalar multiplication"},
     {"transpose", (PyCFunction)PyTensor_transpose, METH_VARARGS, "Transpose tensor"},
     {"layer_norm", (PyCFunction)PyTensor_layer_norm, METH_VARARGS, "Layer normalization"},
     {"rms_norm", (PyCFunction)PyTensor_rms_norm, METH_VARARGS, "RMS normalization"},
@@ -337,6 +368,7 @@ static PyMethodDef PyTensor_methods[] = {
     {"masked_fill", (PyCFunction)PyTensor_masked_fill, METH_VARARGS, "Fill values where mask is true"},
     {"softmax", (PyCFunction)PyTensor_softmax, METH_VARARGS, "Softmax activation"},
     {"gelu", (PyCFunction)PyTensor_gelu, METH_VARARGS, "GELU activation"},
+    {"mean", (PyCFunction)PyTensor_mean, METH_VARARGS, "Compute mean"},
     {"item", (PyCFunction)PyTensor_item, METH_VARARGS, "Get scalar value"},
     {NULL} 
 };
@@ -353,6 +385,7 @@ static PyGetSetDef PyTensor_getset[] = {
 
 static PyNumberMethods PyTensor_as_number = {
     .nb_add = (binaryfunc)PyTensor_add,
+    .nb_subtract = (binaryfunc)PyTensor_sub,
     .nb_multiply = (binaryfunc)PyTensor_mul,
     .nb_matrix_multiply = (binaryfunc)PyTensor_matmul,
 };
@@ -512,6 +545,41 @@ static int PyTensor_setitem(PyTensorObject* self, PyObject* key, PyObject* value
     return -1;
 }
 
+// Add this function before module_methods array
+static PyObject* py_from_numpy(PyObject* self, PyObject* args) {
+    PyArrayObject* np_array;
+    int dtype = DTYPE_FLOAT32;
+    
+    if (!PyArg_ParseTuple(args, "O|i", &np_array, &dtype)) return NULL;
+    
+    if (!PyArray_Check(np_array)) {
+        PyErr_SetString(PyExc_TypeError, "Expected numpy array");
+        return NULL;
+    }
+    
+    // Get shape
+    int ndim = PyArray_NDIM(np_array);
+    npy_intp* np_dims = PyArray_DIMS(np_array);
+    int* shape = (int*)malloc(ndim * sizeof(int));
+    for (int i = 0; i < ndim; i++) {
+        shape[i] = (int)np_dims[i];
+    }
+    
+    // Create tensor
+    Tensor* t = tensor_create(shape, ndim, dtype);
+    free(shape);
+    
+    // Copy data
+    void* np_data = PyArray_DATA(np_array);
+    size_t total = PyArray_SIZE(np_array);
+    memcpy(t->data, np_data, total * sizeof(float));
+    
+    // Wrap and return
+    PyTensorObject* result = PyObject_New(PyTensorObject, &PyTensorType);
+    result->obj = t;
+    return (PyObject*)result;
+}
+
 static PyMappingMethods PyTensor_as_mapping = {
     .mp_subscript = (binaryfunc)PyTensor_getitem,
     .mp_ass_subscript = (objobjargproc)PyTensor_setitem,
@@ -523,6 +591,7 @@ static PyMethodDef module_methods[] = {
     {"zeros", py_zeros, METH_VARARGS, "Tensor filled with zeros"},
     {"ones", py_ones, METH_VARARGS, "Tensor filled with ones"},
     {"triu", py_triu, METH_VARARGS, "Upper triangular matrix"},
+    {"from_numpy", py_from_numpy, METH_VARARGS, "Create tensor from numpy array"},  // Add this
     {NULL}
 };
 
@@ -545,6 +614,8 @@ static PyModuleDef tensor_module = {
 };
 
 PyMODINIT_FUNC PyInit_tensor_c(void) {
+    import_array();  // Initialize NumPy C API
+    
     PyObject* m = PyModule_Create(&tensor_module);
     if (!m) return NULL;
     

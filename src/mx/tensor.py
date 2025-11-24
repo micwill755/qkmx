@@ -20,13 +20,24 @@ class Tensor:
         Create a new tensor.
         
         Args:
-            shape: tuple or list of dimensions, e.g., (3, 4, 5)
+            shape: tuple/list of dimensions, or numpy array/list data
             dtype: data type (float32, int8, etc.)
         """
-        if isinstance(shape, (list, tuple)):
+        import numpy as np
+        
+        # Handle numpy array or nested list (actual data)
+        if isinstance(shape, np.ndarray):
+            self._c_tensor = tensor_c.from_numpy(shape, dtype)
+        elif isinstance(shape, list) and len(shape) > 0 and not isinstance(shape[0], int):
+            # Nested list like [[1,2],[3,4]]
+            data = np.asarray(shape)
+            self._c_tensor = tensor_c.from_numpy(data, dtype)
+        elif isinstance(shape, (list, tuple)):
+            # Shape tuple like (3, 4)
             self._c_tensor = tensor_c.Tensor(list(shape), dtype)
         else:
-            raise TypeError("shape must be a list or tuple")
+            raise TypeError("shape must be a list, tuple, or numpy array")
+
     
     @classmethod
     def _from_c_tensor(cls, c_tensor):
@@ -52,18 +63,30 @@ class Tensor:
     def __mul__(self, other):
         """Element-wise multiplication or scalar multiplication"""
         if isinstance(other, (int, float)):
-            # Scalar multiplication - implement in C or use a workaround
-            raise NotImplementedError("Scalar multiplication not yet implemented")
+            result_c = self._c_tensor.scalar_mul(float(other))
+            return Tensor._from_c_tensor(result_c)
         if not isinstance(other, Tensor):
             raise TypeError("Can only multiply Tensor with Tensor or scalar")
         result_c = self._c_tensor * other._c_tensor
         return Tensor._from_c_tensor(result_c)
-    
+
+    def __rmul__(self, other):
+        """Reverse multiplication (scalar * Tensor)"""
+        return self.__mul__(other)
+
     def __sub__(self, other):
         """Element-wise subtraction"""
-        # TODO: implement in C
-        raise NotImplementedError("Subtraction not yet implemented in C backend")
-    
+        if not isinstance(other, Tensor):
+            raise TypeError("Can only subtract Tensor from Tensor")
+        result_c = self._c_tensor - other._c_tensor
+        return Tensor._from_c_tensor(result_c)
+
+    def __pow__(self, exponent):
+        """Element-wise power"""
+        if not isinstance(exponent, (int, float)):
+            raise TypeError("Exponent must be a scalar")
+        return self * self if exponent == 2 else NotImplemented
+
     def __matmul__(self, other):
         """Matrix multiplication using @ operator (runs in C)"""
         if not isinstance(other, Tensor):
@@ -107,6 +130,10 @@ class Tensor:
         """GELU activation (runs in C)"""
         result_c = self._c_tensor.gelu()
         return Tensor._from_c_tensor(result_c)
+
+    def mean(self):
+        """Compute mean of all elements (runs in C)"""
+        return self._c_tensor.mean()
 
     @property
     def shape(self):
@@ -181,3 +208,6 @@ def rand(shape, dtype=float32):
 def empty(shape, dtype=float32):
     """Create uninitialized tensor (fastest)"""
     return Tensor(shape, dtype)
+
+def zeros_like(tensor):
+    return zeros(tensor.shape)
