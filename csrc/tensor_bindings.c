@@ -547,14 +547,21 @@ static int PyTensor_setitem(PyTensorObject* self, PyObject* key, PyObject* value
 
 // Add this function before module_methods array
 static PyObject* py_from_numpy(PyObject* self, PyObject* args) {
-    PyArrayObject* np_array;
+    PyObject* np_array_obj;
     int dtype = DTYPE_FLOAT32;
     
-    if (!PyArg_ParseTuple(args, "O|i", &np_array, &dtype)) return NULL;
+    if (!PyArg_ParseTuple(args, "O|i", &np_array_obj, &dtype)) return NULL;
     
-    if (!PyArray_Check(np_array)) {
+    if (!PyArray_Check(np_array_obj)) {
         PyErr_SetString(PyExc_TypeError, "Expected numpy array");
         return NULL;
+    }
+    
+    // Ensure array is contiguous and in float32 (allow any casting)
+    PyArrayObject* np_array = (PyArrayObject*)PyArray_FROM_OTF(np_array_obj, NPY_FLOAT32, 
+                                                                NPY_ARRAY_IN_ARRAY | NPY_ARRAY_FORCECAST);
+    if (!np_array) {
+        return NULL;  // PyArray_FROM_OTF already set the error
     }
     
     // Get shape
@@ -577,6 +584,9 @@ static PyObject* py_from_numpy(PyObject* self, PyObject* args) {
     // Wrap and return
     PyTensorObject* result = PyObject_New(PyTensorObject, &PyTensorType);
     result->obj = t;
+    
+    Py_DECREF(np_array);  // Release the converted array
+    
     return (PyObject*)result;
 }
 
@@ -585,13 +595,108 @@ static PyMappingMethods PyTensor_as_mapping = {
     .mp_ass_subscript = (objobjargproc)PyTensor_setitem,
 };
 
+// Helper to recursively parse nested Python lists and fill tensor data
+static int parse_nested_list(PyObject* list, float* data, int* shape, int ndim, int current_dim, size_t* offset) {
+    if (current_dim == ndim - 1) {
+        // Base case: innermost dimension
+        if (!PyList_Check(list)) return -1;
+        Py_ssize_t size = PyList_Size(list);
+        if (size != shape[current_dim]) return -1;
+        
+        for (Py_ssize_t i = 0; i < size; i++) {
+            PyObject* item = PyList_GetItem(list, i);
+            if (PyFloat_Check(item)) {
+                data[(*offset)++] = PyFloat_AsDouble(item);
+            } else if (PyLong_Check(item)) {
+                data[(*offset)++] = (float)PyLong_AsLong(item);
+            } else {
+                return -1;
+            }
+        }
+        return 0;
+    }
+    
+    // Recursive case
+    if (!PyList_Check(list)) return -1;
+    Py_ssize_t size = PyList_Size(list);
+    if (size != shape[current_dim]) return -1;
+    
+    for (Py_ssize_t i = 0; i < size; i++) {
+        PyObject* sublist = PyList_GetItem(list, i);
+        if (parse_nested_list(sublist, data, shape, ndim, current_dim + 1, offset) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+// Helper to infer shape from nested Python list
+static int infer_shape(PyObject* list, int* shape, int max_ndim, int current_dim) {
+    if (!PyList_Check(list)) return current_dim;
+    
+    Py_ssize_t size = PyList_Size(list);
+    if (size == 0) return current_dim;
+    
+    shape[current_dim] = size;
+    
+    PyObject* first = PyList_GetItem(list, 0);
+    if (PyList_Check(first)) {
+        return infer_shape(first, shape, max_ndim, current_dim + 1);
+    }
+    
+    return current_dim + 1;
+}
+
+// Create tensor from nested Python list
+static PyObject* py_from_list(PyObject* self, PyObject* args) {
+    PyObject* list_obj;
+    int dtype = DTYPE_FLOAT32;
+    
+    if (!PyArg_ParseTuple(args, "O|i", &list_obj, &dtype)) return NULL;
+    
+    if (!PyList_Check(list_obj)) {
+        PyErr_SetString(PyExc_TypeError, "Expected a list");
+        return NULL;
+    }
+    
+    // Infer shape
+    int shape[8];  // Max 8 dimensions
+    int ndim = infer_shape(list_obj, shape, 8, 0);
+    
+    if (ndim == 0) {
+        PyErr_SetString(PyExc_ValueError, "Cannot create tensor from empty list");
+        return NULL;
+    }
+    
+    // Create tensor
+    Tensor* t = tensor_create(shape, ndim, dtype);
+    if (!t) {
+        PyErr_SetString(PyExc_RuntimeError, "Failed to create tensor");
+        return NULL;
+    }
+    
+    // Fill data
+    size_t offset = 0;
+    if (parse_nested_list(list_obj, (float*)t->data, shape, ndim, 0, &offset) != 0) {
+        tensor_free(t);
+        PyErr_SetString(PyExc_ValueError, "Invalid nested list structure");
+        return NULL;
+    }
+    
+    // Wrap and return
+    PyTensorObject* result = PyObject_New(PyTensorObject, &PyTensorType);
+    result->obj = t;
+    return (PyObject*)result;
+}
+
 // Module methods
 static PyMethodDef module_methods[] = {
     {"randn", py_randn, METH_VARARGS, "Random normal tensor"},
     {"zeros", py_zeros, METH_VARARGS, "Tensor filled with zeros"},
     {"ones", py_ones, METH_VARARGS, "Tensor filled with ones"},
     {"triu", py_triu, METH_VARARGS, "Upper triangular matrix"},
-    {"from_numpy", py_from_numpy, METH_VARARGS, "Create tensor from numpy array"},  // Add this
+    {"from_numpy", py_from_numpy, METH_VARARGS, "Create tensor from numpy array"},
+    {"from_list", py_from_list, METH_VARARGS, "Create tensor from nested Python list"},
     {NULL}
 };
 

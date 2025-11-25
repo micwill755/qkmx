@@ -25,15 +25,14 @@ class Tensor:
         """
         import numpy as np
         
-        # Handle numpy array or nested list (actual data)
+        # Handle numpy array
         if isinstance(shape, np.ndarray):
             self._c_tensor = tensor_c.from_numpy(shape, dtype)
+        # Handle nested list (actual data) like [[1,2],[3,4]]
         elif isinstance(shape, list) and len(shape) > 0 and not isinstance(shape[0], int):
-            # Nested list like [[1,2],[3,4]]
-            data = np.asarray(shape)
-            self._c_tensor = tensor_c.from_numpy(data, dtype)
+            self._c_tensor = tensor_c.from_list(shape, dtype)
+        # Handle shape tuple like (3, 4)
         elif isinstance(shape, (list, tuple)):
-            # Shape tuple like (3, 4)
             self._c_tensor = tensor_c.Tensor(list(shape), dtype)
         else:
             raise TypeError("shape must be a list, tuple, or numpy array")
