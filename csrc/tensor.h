@@ -5,6 +5,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef enum {
     DEVICE_CPU,
     DEVICE_CUDA
@@ -37,9 +41,9 @@ typedef struct {
 } Tensor;
 
 // Core functions
-Tensor* tensor_create(int* shape, int ndim, DType dtype);
-Tensor* tensor_randn(int* shape, int ndim, DType dtype);
-Tensor* tensor_rand(int* shape, int ndim, DType dtype);
+Tensor* tensor_create(int* shape, int ndim, DType dtype, DeviceType device);
+Tensor* tensor_randn(int* shape, int ndim, DType dtype, DeviceType device);
+Tensor* tensor_rand(int* shape, int ndim, DType dtype, DeviceType device);
 void tensor_free(Tensor *t);
 Tensor* tensor_op(const Tensor* a, const Tensor* b, TensorOperation op);
 Tensor* tensor_matmul(const Tensor* a, const Tensor* b);
@@ -51,9 +55,8 @@ Tensor* tensor_layer_norm(const Tensor* x, const Tensor* gamma,
 Tensor* tensor_rms_norm(const Tensor* x, const Tensor* weight, float eps);
 Tensor* tensor_triu(int size, int diagonal);
 Tensor* tensor_masked_fill(const Tensor* t, const Tensor* mask, float value);
-Tensor* tensor_rand(int* shape, int ndim, DType dtype);
-Tensor* tensor_zeros(int* shape, int ndim, DType dtype);
-Tensor* tensor_ones(int* shape, int ndim, DType dtype);
+Tensor* tensor_zeros(int* shape, int ndim, DType dtype, DeviceType device);
+Tensor* tensor_ones(int* shape, int ndim, DType dtype, DeviceType device);
 void tensor_free(Tensor *t);
 Tensor* tensor_get_index(Tensor* t, int index);
 Tensor* tensor_advanced_index(Tensor* t, Tensor* indices);
@@ -68,5 +71,9 @@ float tensor_mean(const Tensor* t);
 // device functions
 Tensor* tensor_to_cuda(const Tensor* t);
 Tensor* tensor_to_cpu(const Tensor* t);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // TENSOR_H

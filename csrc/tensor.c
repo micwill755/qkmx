@@ -1,6 +1,7 @@
-// tensor.c - Core tensor implementation
+// tensor.c - Core tensor implementation (dispatch layer)
 #include "tensor.h"
 #include "util.h"
+#include "cpu/tensor_cpu.h"
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -11,70 +12,49 @@
 #include <numpy/arrayobject.h>
 
 #ifdef USE_CUDA
-#include <cuda_runtime.h>
+#include "cuda_driver/tensor_cuda.h"
+#include <cuda.h>
 #endif
 
 #include "dispatch.h"
 
 // ============================================================================
-// MEMORY MANAGEMENT
+// MEMORY MANAGEMENT - Dispatch to backend
 // ============================================================================
 
-Tensor* tensor_create(int* shape, int ndim, DType dtype) {
-    Tensor *t = malloc(sizeof(Tensor));
-    if (!t) return NULL;
-    
-    t->ndim = ndim;
-    t->dtype = dtype;
-    t->owns_data = 1;
-    t->strides = NULL;
-    t->device = DEVICE_CPU;
-    t->shape = malloc(ndim * sizeof(int));
-    if (!t->shape) {
-        free(t);
-        return NULL;
+Tensor* tensor_create(int* shape, int ndim, DType dtype, DeviceType device) {
+    if (device == DEVICE_CUDA) {
+#ifdef USE_CUDA
+        return tensor_create_cuda(shape, ndim, dtype);
+#else
+        fprintf(stderr, "CUDA not available, falling back to CPU\n");
+        return tensor_create_cpu(shape, ndim, dtype);
+#endif
     }
-    
-    t->size = 1;
-    for (int i = 0; i < ndim; i++) {
-        t->shape[i] = shape[i];
-        t->size *= shape[i];
-    }
-
-    size_t bytes;
-    switch(dtype) {
-        case DTYPE_FLOAT32: bytes = t->size * 4; break;
-        case DTYPE_FLOAT16: bytes = t->size * 2; break;
-        case DTYPE_INT8:    bytes = t->size; break;
-        case DTYPE_INT4:    bytes = (t->size + 1) / 2; break;
-        case DTYPE_UINT8:   bytes = t->size; break;
-        default:            bytes = t->size * 4; break;
-    }
-    t->data = calloc(bytes, 1);
-    if (!t->data) {
-        free(t->shape);
-        free(t);
-        return NULL;
-    }
-
-    return t;
+    return tensor_create_cpu(shape, ndim, dtype);
 }
 
-Tensor* tensor_zeros(int* shape, int ndim, DType dtype) {
-    return tensor_create(shape, ndim, dtype);
+Tensor* tensor_zeros(int* shape, int ndim, DType dtype, DeviceType device) {
+    return tensor_create(shape, ndim, dtype, device);
 }
 
 // ============================================================================
 // TENSOR CREATION
 // ============================================================================
 
-Tensor* tensor_ones(int* shape, int ndim, DType dtype) {
-    Tensor* t = tensor_create(shape, ndim, dtype);
+Tensor* tensor_ones(int* shape, int ndim, DType dtype, DeviceType device) {
+    Tensor* t = tensor_create(shape, ndim, dtype, DEVICE_CPU);  // Create on CPU first
     if (dtype == DTYPE_FLOAT32) {
         float* data = (float*)t->data;
         for (size_t i = 0; i < t->size; i++) {
             data[i] = 1.0f;
         }
+    }
+    // Move to requested device if needed
+    if (device == DEVICE_CUDA) {
+        Tensor* gpu_t = tensor_to_cuda(t);
+        tensor_free(t);
+        return gpu_t;
     }
     return t;
 }
@@ -87,8 +67,8 @@ static void ensure_seeded(void) {
     }
 }
 
-Tensor* tensor_randn(int* shape, int ndim, DType dtype) {
-    Tensor* t = tensor_create(shape, ndim, dtype);
+Tensor* tensor_randn(int* shape, int ndim, DType dtype, DeviceType device) {
+    Tensor* t = tensor_create(shape, ndim, dtype, DEVICE_CPU);  // Generate on CPU
     if (!t) return NULL;
     
     ensure_seeded();
@@ -100,11 +80,16 @@ Tensor* tensor_randn(int* shape, int ndim, DType dtype) {
         }
     }
     
+    if (device == DEVICE_CUDA) {
+        Tensor* gpu_t = tensor_to_cuda(t);
+        tensor_free(t);
+        return gpu_t;
+    }
     return t;
 }
 
-Tensor* tensor_rand(int* shape, int ndim, DType dtype) {
-    Tensor* t = tensor_create(shape, ndim, dtype);
+Tensor* tensor_rand(int* shape, int ndim, DType dtype, DeviceType device) {
+    Tensor* t = tensor_create(shape, ndim, dtype, DEVICE_CPU);  // Generate on CPU
     if (!t) return NULL;
     
     ensure_seeded();
@@ -116,24 +101,24 @@ Tensor* tensor_rand(int* shape, int ndim, DType dtype) {
         }
     }
     
+    if (device == DEVICE_CUDA) {
+        Tensor* gpu_t = tensor_to_cuda(t);
+        tensor_free(t);
+        return gpu_t;
+    }
     return t;
 }
 
 void tensor_free(Tensor *t) {
     if (!t) return;
     
-    if (t->owns_data && t->data) {
-        if (t->device == DEVICE_CUDA) {
+    if (t->device == DEVICE_CUDA) {
 #ifdef USE_CUDA
-            cudaFree(t->data);  // Free GPU memory
+        tensor_free_cuda(t);
 #endif
-        } else {
-            free(t->data);  // Free CPU memory
-        }
+    } else {
+        tensor_free_cpu(t);
     }
-    free(t->shape);
-    free(t->strides);
-    free(t);
 }
 
 
@@ -162,7 +147,7 @@ Tensor* tensor_op(const Tensor* a, const Tensor* b, TensorOperation op) {
         out_shape[i] = (dim_a > dim_b) ? dim_a : dim_b;
     }
     
-    Tensor* out = tensor_create(out_shape, out_ndim, a->dtype);
+    Tensor* out = tensor_create(out_shape, out_ndim, a->dtype, a->device);
     free(out_shape);
     
     if (a->dtype == DTYPE_FLOAT32) {
@@ -234,7 +219,7 @@ Tensor* tensor_op(const Tensor* a, const Tensor* b, TensorOperation op) {
 }
 
 Tensor* tensor_scalar_op(const Tensor* t, float scalar, TensorOperation op) {
-    Tensor* out = tensor_create(t->shape, t->ndim, t->dtype);
+    Tensor* out = tensor_create(t->shape, t->ndim, t->dtype, t->device);
     
     if (t->dtype == DTYPE_FLOAT32) {
         float* in_data = (float*)t->data;
@@ -277,7 +262,7 @@ Tensor* tensor_transpose(const Tensor* t, int dim0, int dim1) {
     if (dim0 < 0 || dim0 >= t->ndim || dim1 < 0 || dim1 >= t->ndim) return NULL;
     if (dim0 == dim1) {
         // Same dimension, just copy
-        Tensor* out = tensor_create(t->shape, t->ndim, t->dtype);
+        Tensor* out = tensor_create(t->shape, t->ndim, t->dtype, t->device);
         memcpy(out->data, t->data, t->size * sizeof(float));  // Assumes FLOAT32
         return out;
     }
@@ -288,7 +273,7 @@ Tensor* tensor_transpose(const Tensor* t, int dim0, int dim1) {
     new_shape[dim0] = t->shape[dim1];
     new_shape[dim1] = t->shape[dim0];
     
-    Tensor* out = tensor_create(new_shape, t->ndim, t->dtype);
+    Tensor* out = tensor_create(new_shape, t->ndim, t->dtype, t->device);
     free(new_shape);
     
     if (t->dtype == DTYPE_FLOAT32) {
@@ -373,7 +358,7 @@ Tensor* tensor_layer_norm(const Tensor* x, const Tensor* gamma,
 }
 
 Tensor* tensor_rms_norm(const Tensor* x, const Tensor* weight, float eps) {
-    Tensor* out = tensor_create(x->shape, x->ndim, x->dtype);
+    Tensor* out = tensor_create(x->shape, x->ndim, x->dtype, x->device);
     float* x_data = (float*)x->data;
     float* out_data = (float*)out->data;
     float* weight_data = (float*)weight->data;
@@ -406,7 +391,7 @@ Tensor* tensor_rms_norm(const Tensor* x, const Tensor* weight, float eps) {
 
 Tensor* tensor_triu(int size, int diagonal) {
     int shape[2] = {size, size};
-    Tensor* out = tensor_create(shape, 2, DTYPE_FLOAT32);
+    Tensor* out = tensor_create(shape, 2, DTYPE_FLOAT32, DEVICE_CPU);
     float* data = (float*)out->data;
     
     for (int i = 0; i < size; i++) {
@@ -419,7 +404,7 @@ Tensor* tensor_triu(int size, int diagonal) {
 
 // Masked fill
 Tensor* tensor_masked_fill(const Tensor* t, const Tensor* mask, float value) {
-    Tensor* out = tensor_create(t->shape, t->ndim, t->dtype);
+    Tensor* out = tensor_create(t->shape, t->ndim, t->dtype, DEVICE_CPU);
     float* in_data = (float*)t->data;
     float* out_data = (float*)out->data;
     float* mask_data = (float*)mask->data;
@@ -452,7 +437,7 @@ Tensor* tensor_get_index(Tensor* t, int index) {
     if (t->ndim == 1) {
         // Return scalar as 0-d tensor (must copy for scalar)
         int shape = 1;
-        Tensor* result = tensor_create(&shape, 1, t->dtype);
+        Tensor* result = tensor_create(&shape, 1, t->dtype, DEVICE_CPU);
 
         float* src = (float*)t->data + index;
         float* dst = (float*)result->data;
@@ -519,7 +504,7 @@ Tensor* tensor_advanced_index(Tensor* t, Tensor* indices) {
     }
     
     int out_ndim = indices->ndim + t->ndim - 1;
-    Tensor* result = tensor_create(out_shape, out_ndim, t->dtype);
+    Tensor* result = tensor_create(out_shape, out_ndim, t->dtype, DEVICE_CPU);
     free(out_shape);
     
     // Calculate row size
@@ -603,4 +588,43 @@ float tensor_mean(const Tensor* t) {
         sum += data[i];
     }
     return sum / t->size;
+}
+
+// ============================================================================
+// DEVICE TRANSFER
+// ============================================================================
+
+Tensor* tensor_to_cuda(const Tensor* t) {
+#ifdef USE_CUDA
+    if (t->device == DEVICE_CUDA) {
+        // Already on CUDA - make a copy
+        Tensor* out = tensor_create_cuda(t->shape, t->ndim, t->dtype);
+        if (!out) return NULL;
+        size_t bytes = t->size * sizeof(float);
+        cuMemcpyDtoD((CUdeviceptr)out->data, (CUdeviceptr)t->data, bytes);
+        return out;
+    }
+    // CPU to CUDA
+    return tensor_cpu_to_cuda(t);
+#else
+    fprintf(stderr, "CUDA not available\n");
+    return NULL;
+#endif
+}
+
+Tensor* tensor_to_cpu(const Tensor* t) {
+    if (t->device == DEVICE_CPU) {
+        // Already on CPU - make a copy
+        Tensor* out = tensor_create_cpu(t->shape, t->ndim, t->dtype);
+        if (!out) return NULL;
+        memcpy(out->data, t->data, t->size * sizeof(float));
+        return out;
+    }
+#ifdef USE_CUDA
+    // CUDA to CPU
+    return tensor_cuda_to_cpu(t);
+#else
+    fprintf(stderr, "CUDA not available\n");
+    return NULL;
+#endif
 }

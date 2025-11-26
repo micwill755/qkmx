@@ -46,7 +46,7 @@ Tensor* matmul_cpu(const Tensor* a, const Tensor* b) {
     out_shape[out_ndim - 2] = M;
     out_shape[out_ndim - 1] = N;
     
-    Tensor* out = tensor_create(out_shape, out_ndim, a->dtype);
+    Tensor* out = tensor_create(out_shape, out_ndim, a->dtype, DEVICE_CPU);
     free(out_shape);
     
     size_t total_batch = 1;

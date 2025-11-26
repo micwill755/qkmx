@@ -10,13 +10,22 @@ static const DispatchTable cpu_dispatch = {
 };
 
 #ifdef USE_CUDA
-// CUDA dispatch table
+// CUDA dispatch table - use Driver API if available
+#ifdef USE_CUDA_DRIVER_API
+static const DispatchTable cuda_dispatch = {
+    .gelu = gelu_cuda_driver,
+    .matmul = matmul_cuda_driver,
+    .softmax = softmax_cuda_driver,
+    .layer_norm = layer_norm_cuda_driver,
+};
+#else
 static const DispatchTable cuda_dispatch = {
     .gelu = gelu_cuda,
     .matmul = matmul_cuda,
     .softmax = softmax_cuda,
     .layer_norm = layer_norm_cuda,
 };
+#endif
 #endif
 
 // Get dispatch table based on device

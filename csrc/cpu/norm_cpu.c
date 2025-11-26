@@ -2,7 +2,7 @@
 #include <math.h>
 
 Tensor* layer_norm_cpu(const Tensor* x, const Tensor* gamma, const Tensor* beta, float eps) {
-    Tensor* out = tensor_create(x->shape, x->ndim, x->dtype);
+    Tensor* out = tensor_create(x->shape, x->ndim, x->dtype, DEVICE_CPU);
     float* x_data = (float*)x->data;
     float* out_data = (float*)out->data;
     float* gamma_data = (float*)gamma->data;

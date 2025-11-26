@@ -157,6 +157,21 @@ class Tensor:
             s *= d
         return s
     
+    @property
+    def is_cuda(self):
+        """True if tensor is on CUDA device"""
+        return self._c_tensor.is_cuda
+    
+    def cuda(self):
+        """Move tensor to CUDA device"""
+        result_c = self._c_tensor.cuda()
+        return Tensor._from_c_tensor(result_c)
+    
+    def cpu(self):
+        """Move tensor to CPU"""
+        result_c = self._c_tensor.cpu()
+        return Tensor._from_c_tensor(result_c)
+    
     def __str__(self):
         """Delegate to C tensor's string representation"""
         return str(self._c_tensor)
@@ -184,29 +199,41 @@ class Tensor:
         else:
             self._c_tensor[index] = value
 
-def zeros(shape, dtype=float32):
+def zeros(shape, dtype=float32, device='cpu'):
     """Create tensor filled with zeros"""
-    return Tensor(shape, dtype)  # Already zeros from calloc!
+    c_tensor = tensor_c.zeros(list(shape), dtype, device=device)
+    return Tensor._from_c_tensor(c_tensor)
 
-def ones(shape, dtype=float32):
+def ones(shape, dtype=float32, device='cpu'):
     """Create tensor filled with ones"""
-    t = Tensor(shape, dtype)
-    # TODO: call C function to fill with 1.0
-    return t
+    c_tensor = tensor_c.ones(list(shape), dtype, device=device)
+    return Tensor._from_c_tensor(c_tensor)
 
-def randn(shape, dtype=float32):
+def randn(shape, dtype=float32, device='cpu'):
     """Create tensor with random normal values"""
-    c_tensor = tensor_c.randn(list(shape), dtype)
+    c_tensor = tensor_c.randn(list(shape), dtype, device=device)
     return Tensor._from_c_tensor(c_tensor)
 
-def rand(shape, dtype=float32):
+def rand(shape, dtype=float32, device='cpu'):
     """Create tensor with random uniform [0, 1)"""
-    c_tensor = tensor_c.rand(list(shape), dtype)
+    c_tensor = tensor_c.randn(list(shape), dtype, device=device)  # TODO: add rand to C
     return Tensor._from_c_tensor(c_tensor)
 
-def empty(shape, dtype=float32):
+def empty(shape, dtype=float32, device='cpu'):
     """Create uninitialized tensor (fastest)"""
-    return Tensor(shape, dtype)
+    c_tensor = tensor_c.zeros(list(shape), dtype, device=device)
+    return Tensor._from_c_tensor(c_tensor)
 
 def zeros_like(tensor):
-    return zeros(tensor.shape)
+    device = 'cuda' if tensor.is_cuda else 'cpu'
+    return zeros(tensor.shape, device=device)
+
+def from_list(data, dtype=float32, device='cpu'):
+    """Create tensor from nested Python list"""
+    c_tensor = tensor_c.from_list(data, dtype, device=device)
+    return Tensor._from_c_tensor(c_tensor)
+
+def from_numpy(array, dtype=float32, device='cpu'):
+    """Create tensor from numpy array"""
+    c_tensor = tensor_c.from_numpy(array, dtype, device=device)
+    return Tensor._from_c_tensor(c_tensor)

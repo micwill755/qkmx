@@ -2,7 +2,7 @@
 #include <math.h>
 
 Tensor* gelu_cpu(const Tensor* t) {
-    Tensor* out = tensor_create(t->shape, t->ndim, t->dtype);
+    Tensor* out = tensor_create(t->shape, t->ndim, t->dtype, DEVICE_CPU);
     
     if (t->dtype == DTYPE_FLOAT32) {
         float* in_data = (float*)t->data;
@@ -20,7 +20,7 @@ Tensor* gelu_cpu(const Tensor* t) {
 }
 
 Tensor* softmax_cpu(const Tensor* t, int dim) {
-    Tensor* out = tensor_create(t->shape, t->ndim, t->dtype);
+    Tensor* out = tensor_create(t->shape, t->ndim, t->dtype, DEVICE_CPU);
     
     if (t->dtype == DTYPE_FLOAT32) {
         float* in_data = (float*)t->data;

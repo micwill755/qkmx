@@ -1,8 +1,13 @@
 // tensor_bindings.c - Python bindings using qkbind
 #include "qkbind.h"
 #include "tensor.h"
+#include <string.h>
 #define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
 #include <numpy/arrayobject.h>
+
+#ifdef USE_CUDA
+#include <cuda.h>
+#endif
 
 // Forward declare the type
 static PyTypeObject PyTensorType;
@@ -11,7 +16,7 @@ static PyTypeObject PyTensorType;
 QKBIND_WRAP(Tensor, Tensor)
 
 // __init__ - Create tensor from shape and dtype
-QKBIND_INIT(Tensor, Tensor, tensor_create(shape, ndim, dtype),
+QKBIND_INIT(Tensor, Tensor, tensor_create(shape, ndim, dtype, DEVICE_CPU),
     PyObject* shape_obj;
     int dtype = DTYPE_FLOAT32;
     
@@ -52,11 +57,14 @@ QKBIND_BINOP(Tensor, sub, tensor_sub_wrapper)
 
 QKBIND_METHOD(Tensor, matmul, tensor_matmul)
 
-static PyObject* py_zeros(PyObject* self, PyObject* args) {
+static PyObject* py_zeros(PyObject* self, PyObject* args, PyObject* kwargs) {
     PyObject* shape_obj;
     int dtype = DTYPE_FLOAT32;
+    const char* device_str = "cpu";
     
-    if (!PyArg_ParseTuple(args, "O|i", &shape_obj, &dtype)) return NULL;
+    static char* kwlist[] = {"shape", "dtype", "device", NULL};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|is", kwlist, 
+                                      &shape_obj, &dtype, &device_str)) return NULL;
     
     int ndim = PyList_Size(shape_obj);
     int* shape = (int*)malloc(ndim * sizeof(int));
@@ -64,19 +72,28 @@ static PyObject* py_zeros(PyObject* self, PyObject* args) {
         shape[i] = PyLong_AsLong(PyList_GetItem(shape_obj, i));
     }
     
-    Tensor* t = tensor_zeros(shape, ndim, dtype);
+    DeviceType device = (strcmp(device_str, "cuda") == 0) ? DEVICE_CUDA : DEVICE_CPU;
+    Tensor* t = tensor_zeros(shape, ndim, dtype, device);
     free(shape);
+    
+    if (!t) {
+        PyErr_SetString(PyExc_RuntimeError, "Failed to create tensor");
+        return NULL;
+    }
     
     PyTensorObject* result = PyObject_New(PyTensorObject, &PyTensorType);
     result->obj = t;
     return (PyObject*)result;
 }
 
-static PyObject* py_ones(PyObject* self, PyObject* args) {
+static PyObject* py_ones(PyObject* self, PyObject* args, PyObject* kwargs) {
     PyObject* shape_obj;
     int dtype = DTYPE_FLOAT32;
+    const char* device_str = "cpu";
     
-    if (!PyArg_ParseTuple(args, "O|i", &shape_obj, &dtype)) return NULL;
+    static char* kwlist[] = {"shape", "dtype", "device", NULL};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|is", kwlist,
+                                      &shape_obj, &dtype, &device_str)) return NULL;
     
     int ndim = PyList_Size(shape_obj);
     int* shape = (int*)malloc(ndim * sizeof(int));
@@ -84,8 +101,14 @@ static PyObject* py_ones(PyObject* self, PyObject* args) {
         shape[i] = PyLong_AsLong(PyList_GetItem(shape_obj, i));
     }
     
-    Tensor* t = tensor_ones(shape, ndim, dtype);
+    DeviceType device = (strcmp(device_str, "cuda") == 0) ? DEVICE_CUDA : DEVICE_CPU;
+    Tensor* t = tensor_ones(shape, ndim, dtype, device);
     free(shape);
+    
+    if (!t) {
+        PyErr_SetString(PyExc_RuntimeError, "Failed to create tensor");
+        return NULL;
+    }
     
     PyTensorObject* result = PyObject_New(PyTensorObject, &PyTensorType);
     result->obj = t;
@@ -356,6 +379,37 @@ static PyObject* PyTensor_mean(PyTensorObject* self, PyObject* args) {
     return PyFloat_FromDouble(result);
 }
 
+// cuda method - move tensor to GPU
+static PyObject* PyTensor_cuda(PyTensorObject* self, PyObject* args) {
+    Tensor* result = tensor_to_cuda(self->obj);
+    if (!result) {
+        PyErr_SetString(PyExc_RuntimeError, "Failed to move tensor to CUDA (CUDA not available?)");
+        return NULL;
+    }
+    
+    PyTensorObject* py_result = PyObject_New(PyTensorObject, &PyTensorType);
+    py_result->obj = result;
+    return (PyObject*)py_result;
+}
+
+// cpu method - move tensor to CPU
+static PyObject* PyTensor_cpu(PyTensorObject* self, PyObject* args) {
+    Tensor* result = tensor_to_cpu(self->obj);
+    if (!result) {
+        PyErr_SetString(PyExc_RuntimeError, "Failed to move tensor to CPU");
+        return NULL;
+    }
+    
+    PyTensorObject* py_result = PyObject_New(PyTensorObject, &PyTensorType);
+    py_result->obj = result;
+    return (PyObject*)py_result;
+}
+
+// is_cuda property getter
+static PyObject* PyTensor_get_is_cuda(PyTensorObject* self, void* closure) {
+    return PyBool_FromLong(self->obj->device == DEVICE_CUDA);
+}
+
 // Method table
 static PyMethodDef PyTensor_methods[] = {
     {"matmul", (PyCFunction)PyTensor_matmul, METH_VARARGS, "Matrix multiplication"},
@@ -370,6 +424,8 @@ static PyMethodDef PyTensor_methods[] = {
     {"gelu", (PyCFunction)PyTensor_gelu, METH_VARARGS, "GELU activation"},
     {"mean", (PyCFunction)PyTensor_mean, METH_VARARGS, "Compute mean"},
     {"item", (PyCFunction)PyTensor_item, METH_VARARGS, "Get scalar value"},
+    {"cuda", (PyCFunction)PyTensor_cuda, METH_NOARGS, "Move tensor to CUDA"},
+    {"cpu", (PyCFunction)PyTensor_cpu, METH_NOARGS, "Move tensor to CPU"},
     {NULL} 
 };
 
@@ -380,6 +436,7 @@ static PyGetSetDef PyTensor_getset[] = {
     {"size", (getter)PyTensor_get_size, NULL, "Total elements", NULL},
     {"ndim", (getter)PyTensor_get_ndim, NULL, "Number of dimensions", NULL},
     {"T", (getter)PyTensor_get_T, NULL, "Transposed tensor", NULL},
+    {"is_cuda", (getter)PyTensor_get_is_cuda, NULL, "True if tensor is on CUDA", NULL},
     {NULL}
 };
 
@@ -417,26 +474,56 @@ static PyObject* PyTensor_str(PyTensorObject* self) {
     Tensor* t = self->obj;
     
     if (t->dtype != DTYPE_FLOAT32) {
-        return PyUnicode_FromFormat("tensor(shape=%R, dtype=%d)", 
-                                    PyTensor_get_shape(self, NULL), t->dtype);
+        return PyUnicode_FromFormat("tensor(shape=%R, dtype=%d, device=%s)", 
+                                    PyTensor_get_shape(self, NULL), t->dtype,
+                                    t->device == DEVICE_CUDA ? "cuda" : "cpu");
     }
     
-    float* data = (float*)t->data;
+    // If tensor is on GPU, copy to CPU for printing
+    float* data;
+    float* temp_buffer = NULL;
+    
+    if (t->device == DEVICE_CUDA) {
+#ifdef USE_CUDA
+        temp_buffer = (float*)malloc(t->size * sizeof(float));
+        if (!temp_buffer) {
+            return PyUnicode_FromString("tensor(...)");
+        }
+        // Copy from GPU to CPU
+        extern void cuda_driver_init(void);
+        cuda_driver_init();
+        cuMemcpyDtoH(temp_buffer, (CUdeviceptr)t->data, t->size * sizeof(float));
+        data = temp_buffer;
+#else
+        return PyUnicode_FromString("tensor(cuda, no CUDA support)");
+#endif
+    } else {
+        data = (float*)t->data;
+    }
+    
     static char buffer[10000];
     char* ptr = buffer;
     
     size_t offset = 0;
     build_str(&ptr, t->shape, t->ndim, data, &offset, 0);
     
-    return PyUnicode_FromFormat("tensor(%s)", buffer);
+    if (temp_buffer) {
+        free(temp_buffer);
+    }
+    
+    const char* device_str = (t->device == DEVICE_CUDA) ? ", device='cuda'" : "";
+    return PyUnicode_FromFormat("tensor(%s%s)", buffer, device_str);
 }
 
 // Module-level function for randn
-static PyObject* py_randn(PyObject* self, PyObject* args) {
+static PyObject* py_randn(PyObject* self, PyObject* args, PyObject* kwargs) {
     PyObject* shape_obj;
     int dtype = DTYPE_FLOAT32;
+    const char* device_str = "cpu";
     
-    if (!PyArg_ParseTuple(args, "O|i", &shape_obj, &dtype)) return NULL;
+    static char* kwlist[] = {"shape", "dtype", "device", NULL};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|is", kwlist,
+                                      &shape_obj, &dtype, &device_str)) return NULL;
     
     int ndim = PyList_Size(shape_obj);
     int* shape = (int*)malloc(ndim * sizeof(int));
@@ -444,8 +531,14 @@ static PyObject* py_randn(PyObject* self, PyObject* args) {
         shape[i] = PyLong_AsLong(PyList_GetItem(shape_obj, i));
     }
     
-    Tensor* t = tensor_randn(shape, ndim, dtype);
+    DeviceType device = (strcmp(device_str, "cuda") == 0) ? DEVICE_CUDA : DEVICE_CPU;
+    Tensor* t = tensor_randn(shape, ndim, dtype, device);
     free(shape);
+    
+    if (!t) {
+        PyErr_SetString(PyExc_RuntimeError, "Failed to create tensor");
+        return NULL;
+    }
     
     PyTensorObject* result = PyObject_New(PyTensorObject, &PyTensorType);
     result->obj = t;
@@ -546,11 +639,14 @@ static int PyTensor_setitem(PyTensorObject* self, PyObject* key, PyObject* value
 }
 
 // Add this function before module_methods array
-static PyObject* py_from_numpy(PyObject* self, PyObject* args) {
+static PyObject* py_from_numpy(PyObject* self, PyObject* args, PyObject* kwargs) {
     PyObject* np_array_obj;
     int dtype = DTYPE_FLOAT32;
+    const char* device_str = "cpu";
     
-    if (!PyArg_ParseTuple(args, "O|i", &np_array_obj, &dtype)) return NULL;
+    static char* kwlist[] = {"array", "dtype", "device", NULL};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|is", kwlist,
+                                      &np_array_obj, &dtype, &device_str)) return NULL;
     
     if (!PyArray_Check(np_array_obj)) {
         PyErr_SetString(PyExc_TypeError, "Expected numpy array");
@@ -572,20 +668,37 @@ static PyObject* py_from_numpy(PyObject* self, PyObject* args) {
         shape[i] = (int)np_dims[i];
     }
     
-    // Create tensor
-    Tensor* t = tensor_create(shape, ndim, dtype);
+    // Create tensor on CPU first (need to copy data)
+    Tensor* t = tensor_create(shape, ndim, dtype, DEVICE_CPU);
     free(shape);
+    
+    if (!t) {
+        Py_DECREF(np_array);
+        PyErr_SetString(PyExc_RuntimeError, "Failed to create tensor");
+        return NULL;
+    }
     
     // Copy data
     void* np_data = PyArray_DATA(np_array);
     size_t total = PyArray_SIZE(np_array);
     memcpy(t->data, np_data, total * sizeof(float));
     
+    Py_DECREF(np_array);  // Release the converted array
+    
+    // Move to GPU if requested
+    if (strcmp(device_str, "cuda") == 0) {
+        Tensor* gpu_t = tensor_to_cuda(t);
+        tensor_free(t);
+        if (!gpu_t) {
+            PyErr_SetString(PyExc_RuntimeError, "Failed to move tensor to CUDA");
+            return NULL;
+        }
+        t = gpu_t;
+    }
+    
     // Wrap and return
     PyTensorObject* result = PyObject_New(PyTensorObject, &PyTensorType);
     result->obj = t;
-    
-    Py_DECREF(np_array);  // Release the converted array
     
     return (PyObject*)result;
 }
@@ -648,11 +761,14 @@ static int infer_shape(PyObject* list, int* shape, int max_ndim, int current_dim
 }
 
 // Create tensor from nested Python list
-static PyObject* py_from_list(PyObject* self, PyObject* args) {
+static PyObject* py_from_list(PyObject* self, PyObject* args, PyObject* kwargs) {
     PyObject* list_obj;
     int dtype = DTYPE_FLOAT32;
+    const char* device_str = "cpu";
     
-    if (!PyArg_ParseTuple(args, "O|i", &list_obj, &dtype)) return NULL;
+    static char* kwlist[] = {"data", "dtype", "device", NULL};
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|is", kwlist,
+                                      &list_obj, &dtype, &device_str)) return NULL;
     
     if (!PyList_Check(list_obj)) {
         PyErr_SetString(PyExc_TypeError, "Expected a list");
@@ -668,8 +784,8 @@ static PyObject* py_from_list(PyObject* self, PyObject* args) {
         return NULL;
     }
     
-    // Create tensor
-    Tensor* t = tensor_create(shape, ndim, dtype);
+    // Create tensor on CPU first (need to fill data)
+    Tensor* t = tensor_create(shape, ndim, dtype, DEVICE_CPU);
     if (!t) {
         PyErr_SetString(PyExc_RuntimeError, "Failed to create tensor");
         return NULL;
@@ -683,6 +799,17 @@ static PyObject* py_from_list(PyObject* self, PyObject* args) {
         return NULL;
     }
     
+    // Move to GPU if requested
+    if (strcmp(device_str, "cuda") == 0) {
+        Tensor* gpu_t = tensor_to_cuda(t);
+        tensor_free(t);
+        if (!gpu_t) {
+            PyErr_SetString(PyExc_RuntimeError, "Failed to move tensor to CUDA");
+            return NULL;
+        }
+        t = gpu_t;
+    }
+    
     // Wrap and return
     PyTensorObject* result = PyObject_New(PyTensorObject, &PyTensorType);
     result->obj = t;
@@ -691,12 +818,12 @@ static PyObject* py_from_list(PyObject* self, PyObject* args) {
 
 // Module methods
 static PyMethodDef module_methods[] = {
-    {"randn", py_randn, METH_VARARGS, "Random normal tensor"},
-    {"zeros", py_zeros, METH_VARARGS, "Tensor filled with zeros"},
-    {"ones", py_ones, METH_VARARGS, "Tensor filled with ones"},
+    {"randn", (PyCFunction)py_randn, METH_VARARGS | METH_KEYWORDS, "Random normal tensor"},
+    {"zeros", (PyCFunction)py_zeros, METH_VARARGS | METH_KEYWORDS, "Tensor filled with zeros"},
+    {"ones", (PyCFunction)py_ones, METH_VARARGS | METH_KEYWORDS, "Tensor filled with ones"},
     {"triu", py_triu, METH_VARARGS, "Upper triangular matrix"},
-    {"from_numpy", py_from_numpy, METH_VARARGS, "Create tensor from numpy array"},
-    {"from_list", py_from_list, METH_VARARGS, "Create tensor from nested Python list"},
+    {"from_numpy", (PyCFunction)py_from_numpy, METH_VARARGS | METH_KEYWORDS, "Create tensor from numpy array"},
+    {"from_list", (PyCFunction)py_from_list, METH_VARARGS | METH_KEYWORDS, "Create tensor from nested Python list"},
     {NULL}
 };
 

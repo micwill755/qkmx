@@ -3,6 +3,10 @@
 
 #include "tensor.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // Function pointer types for each operation
 typedef Tensor* (*gelu_fn)(const Tensor*);
 typedef Tensor* (*matmul_fn)(const Tensor*, const Tensor*);
@@ -56,10 +60,29 @@ Tensor* layer_norm_cpu(const Tensor* x, const Tensor* gamma, const Tensor* beta,
 
 // CUDA implementations (forward declarations)
 #ifdef USE_CUDA
+
+// CUDA Driver API implementations (pure C)
+Tensor* gelu_cuda_driver(const Tensor* t);
+Tensor* matmul_cuda_driver(const Tensor* a, const Tensor* b);
+Tensor* softmax_cuda_driver(const Tensor* t, int dim);
+Tensor* layer_norm_cuda_driver(const Tensor* x, const Tensor* gamma, const Tensor* beta, float eps);
+
+// CUDA Runtime API implementations (C++ with extern "C")
+#ifdef __cplusplus
+extern "C" {
+#endif
 Tensor* gelu_cuda(const Tensor* t);
 Tensor* matmul_cuda(const Tensor* a, const Tensor* b);
 Tensor* softmax_cuda(const Tensor* t, int dim);
 Tensor* layer_norm_cuda(const Tensor* x, const Tensor* gamma, const Tensor* beta, float eps);
+#ifdef __cplusplus
+}
+#endif
+
+#endif
+
+#ifdef __cplusplus
+}
 #endif
 
 #endif
